@@ -1,0 +1,5 @@
+__pycache__/
+collatz
+probe_ok
+probe_naive
+*.c
