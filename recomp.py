@@ -134,9 +134,18 @@ def interp(words, a0, base=0, delay_slots=True):
                 reg[d] = v & 0xFFFFFFFF
 
         if m == "jr":
+            # $ra is a return; any other register is an INDIRECT JUMP and the
+            # target is whatever that register holds. Treating both as "return"
+            # was my bug on 2026-09-21, and it was in the interpreter too — so
+            # when indirect.py first ran, the "ground truth" reference agreed
+            # with the broken recompiler and I nearly read that as confirmation.
+            # Two records that share a defect are one record.
             if delay_slots:
                 run_one(words, reg, base, pc + 4)
-            return reg[2]
+            if o[0] == 31:
+                return reg[2]
+            pc = reg[o[0]]
+            continue
         if m in ("beq", "bne"):
             take = (reg[o[0]] == reg[o[1]]) if m == "beq" else (reg[o[0]] != reg[o[1]])
             if delay_slots:
