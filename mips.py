@@ -51,6 +51,8 @@ def I(op, rs, rt, imm):
 # The subset this project needs. Each returns a 32-bit word.
 def addu(rd, rs, rt):   return R(rs, rt, rd, 0x21)
 def subu(rd, rs, rt):   return R(rs, rt, rd, 0x23)
+def lw(rt, off, rs):    return I(0x23, rs, rt, off)
+def sw(rt, off, rs):    return I(0x2B, rs, rt, off)
 def sll(rd, rt, sh):    return R("zero", rt, rd, 0x00, sh)
 def srl(rd, rt, sh):    return R("zero", rt, rd, 0x02, sh)
 def slt(rd, rs, rt):    return R(rs, rt, rd, 0x2A)
@@ -88,6 +90,14 @@ def disasm(w, pc=0):
     if op == 0x09: return ("addiu", (rt, rs, simm), None)
     if op == 0x0C: return ("andi", (rt, rs, imm), None)
     if op == 0x0D: return ("ori", (rt, rs, imm), None)
+    # Loads and stores, added 2026-09-28. Until now both halves of this project
+    # pretended memory did not exist, which meant neither could handle a REAL
+    # jump table: a real one is read from memory (`lw $t3, tbl($t1)`), not
+    # computed arithmetically. Note 0x23 is `lw` as a primary opcode and `subu`
+    # as an R-type funct — different fields, no ambiguity, but worth saying out
+    # loud because I stared at it twice.
+    if op == 0x23: return ("lw", (rt, simm, rs), None)
+    if op == 0x2B: return ("sw", (rt, simm, rs), None)
     raise ValueError(f"unknown opcode 0x{op:02x} in 0x{w:08x}")
 
 
