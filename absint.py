@@ -78,20 +78,41 @@ class SI:
         return f"0x{self.lo:x} + {self.stride}k, k in [0,{(self.hi-self.lo)//self.stride}]"
 
 
+def _wrapped(lo, hi):
+    """A 32-bit add that overflowed produces hi < lo. Say TOP, not nonsense.
+
+    Found 2026-09-29 while building the CFG fixpoint. Widening pushes a bound
+    to the largest representable value; the next `addiu` then wraps, and every
+    arm below masks with MASK independently, so `lo` and `hi` wrap at different
+    times and the result is an interval whose upper bound is BELOW its lower
+    bound. Nothing downstream checks for that — `values()` computes a negative
+    count, `si_below` compares against a bound that is not really a bound — so
+    an unsound value was propagating silently through the whole analysis.
+
+    A wrapped interval is a real thing and there is a real domain for it
+    (wrapped/circular intervals, Navas et al.), which this is not. Until it is,
+    the honest answer is the shrug.
+    """
+    return hi < lo
+
+
 def si_add(a, b):
     if a.top or b.top:
         return SI.TOP()
     if a.stride == 0 and b.stride == 0:
         return SI.const((a.lo + b.lo) & MASK)
     if a.stride == 0:
-        return SI(b.stride, (b.lo + a.lo) & MASK, (b.hi + a.lo) & MASK)
+        lo, hi = (b.lo + a.lo) & MASK, (b.hi + a.lo) & MASK
+        return SI.TOP() if _wrapped(lo, hi) else SI(b.stride, lo, hi)
     if b.stride == 0:
-        return SI(a.stride, (a.lo + b.lo) & MASK, (a.hi + b.lo) & MASK)
+        lo, hi = (a.lo + b.lo) & MASK, (a.hi + b.lo) & MASK
+        return SI.TOP() if _wrapped(lo, hi) else SI(a.stride, lo, hi)
     # Two non-constant strides: only exact when the strides agree. Otherwise
     # the join of the two lattices is not a strided interval and I refuse to
     # pretend it is.
     if a.stride == b.stride:
-        return SI(a.stride, (a.lo + b.lo) & MASK, (a.hi + b.hi) & MASK)
+        lo, hi = (a.lo + b.lo) & MASK, (a.hi + b.hi) & MASK
+        return SI.TOP() if _wrapped(lo, hi) else SI(a.stride, lo, hi)
     return SI.TOP()
 
 
@@ -118,6 +139,17 @@ def si_join(a, b):
         return SI.const(lo) if lo == hi else SI(hi - lo, lo, hi)
     if a.stride == b.stride and (a.lo - b.lo) % max(1, a.stride) == 0:
         return SI(a.stride, min(a.lo, b.lo), max(a.hi, b.hi))
+    # A CONSTANT joined with a progression it already sits on. Added 2026-09-29
+    # while building the CFG fixpoint, which is what exposed it: straight-line
+    # analysis never merges a constant with a loop-carried value, so this arm
+    # was unreachable and the function returned TOP for `{4} ⊔ 4[4,40]` — a
+    # value that is plainly inside the interval it was being joined to. The
+    # missing arm cost the whole loop result, and no existing selftest could
+    # have caught it, because none of them had a back edge.
+    if (a.stride == 0) != (b.stride == 0):
+        c, prog = (a, b) if a.stride == 0 else (b, a)
+        if prog.stride and (c.lo - prog.lo) % prog.stride == 0:
+            return SI(prog.stride, min(prog.lo, c.lo), max(prog.hi, c.lo))
     return SI.TOP()
 
 
