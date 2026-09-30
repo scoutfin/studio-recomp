@@ -289,7 +289,8 @@ def refine_for_edge(regs, facts, branch, kind):
 
 # --- the fixpoint -------------------------------------------------------------
 
-def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400):
+def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400,
+                narrow=True):
     """Worklist fixpoint over basic blocks, widening on back edges.
 
     `delay` is how many times a block may be re-entered before widening kicks
@@ -309,6 +310,7 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400):
     work = [base]
     rounds = 0
     targets, why_all = None, None
+    per_site = {}
 
     while work and rounds < max_rounds:
         rounds += 1
@@ -319,7 +321,20 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400):
         if why and why_all is None:
             why_all = why
         if branch and branch[0] == "jr":
+            # PER SITE, keyed by the jr's own pc. Joining every `jr` in a program
+            # into one answer answers "what can any dispatch reach", which is not
+            # a question anyone asks. It only looked fine while every test
+            # program had exactly one jr; adding a default handler gives two, and
+            # si_join of {32,48,64,80} with {0x99} is TOP — a correct answer to
+            # the wrong question. Found 2026-09-30.
+            jr_pc = blocks[b][-1] if blocks[b] else b
+            for pc in blocks[b]:
+                m2, o2, _ = disasm(words[(pc - base) // 4], pc)
+                if m2 == "jr":
+                    jr_pc = pc
+                    break
             t = regs[branch[1][0]]
+            per_site[jr_pc] = t if jr_pc not in per_site else si_join(per_site[jr_pc], t)
             targets = t if targets is None else si_join(targets, t)
             continue
         for tgt, kind in succ.get(b, []):
@@ -345,8 +360,109 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400):
             print(f"  block {b:#x} done, worklist={[hex(x) for x in work]}")
 
     converged = rounds < max_rounds
+
+    # NARROWING. The ascending pass above is deliberately too generous; this
+    # walks it back down. Opt-out because the two answers are worth comparing —
+    # the whole point of the exercise is the gap between them.
+    wide_targets, narrow_rounds = targets, 0
+    if narrow and converged:
+        entry, nt, narrow_rounds, nwhy, nsites = narrow_cfg(
+            words, base, blocks, succ, entry, ro, trace=trace)
+        if nt is not None:
+            targets = nt
+        if nsites:
+            per_site = nsites
+        if nwhy and why_all is None:
+            why_all = nwhy
+
     return dict(entry=entry, blocks=blocks, succ=succ, targets=targets,
+                wide_targets=wide_targets, narrow_rounds=narrow_rounds,
+                sites=per_site,
                 rounds=rounds, converged=converged, why=why_all)
+
+
+# --- narrowing -----------------------------------------------------------------
+
+def preds_of(succ):
+    """Invert the successor map. Narrowing needs to recompute an entry state
+    purely FROM ITS PREDECESSORS, with no reference to its own previous value —
+    which is the difference between a descending iteration and another join."""
+    out = {}
+    for b, ss in succ.items():
+        for t, kind in ss:
+            out.setdefault(t, []).append((b, kind))
+    return out
+
+
+def narrow_cfg(words, base, blocks, succ, entry, ro, rounds=8, trace=False):
+    """Descending iteration from the widened post-fixpoint — Cousot's narrowing.
+
+    Widening is deliberately too generous: it jumps a growing bound to a
+    threshold to force termination. What it hands back is a POST-fixpoint, some
+    `P` with `F(P) ⊑ P`. The sequence `P, F(P), F²(P), …` is then decreasing, and
+    every term is still above the least fixpoint, so **every term is still
+    sound.** You get to stop wherever you like and the answer remains an
+    over-approximation. That is the whole trick and it is why narrowing is free
+    in the way widening is not.
+
+    On the counter loop the ascending pass widens the loop-body entry to
+    `4[0,40]` — one increment too generous, because 40 is the threshold scraped
+    out of the program. Recomputing from predecessors applies the back edge's
+    `t0 < 40` refinement to a now-finite interval and pulls it to `4[0,36]`,
+    which is the true entry set. The exit edge then yields exactly `{40}`.
+
+    The one thing this must not do is descend BELOW the least fixpoint, which is
+    why each round recomputes from predecessors rather than intersecting with a
+    guess. `F` is monotone, so iterating it cannot undershoot.
+    """
+    preds = preds_of(succ)
+    entry = {b: (dict(v) if v else None) for b, v in entry.items()}
+    init = dict(entry[base]) if entry.get(base) else None
+    n = 0
+    for n in range(1, rounds + 1):
+        nxt = {}
+        for b in blocks:
+            if b == base:
+                nxt[b] = dict(init) if init else None
+                continue
+            acc = None
+            for p, kind in preds.get(b, []):
+                if entry.get(p) is None:
+                    continue
+                regs, facts, branch, _ = run_block(words, base, blocks[p], entry[p], ro)
+                contrib = refine_for_edge(regs, facts, branch, kind)
+                if contrib is None:
+                    continue                       # this edge is not taken
+                acc = state_join(acc, contrib)
+            nxt[b] = acc
+        if nxt == entry:
+            break
+        if trace:
+            for b in sorted(blocks):
+                o = entry[b][8] if entry[b] else None
+                v = nxt[b][8] if nxt[b] else None
+                if str(o) != str(v):
+                    print(f"    round {n}: {b:#06x} t0  {o}  ->  {v}")
+        entry = nxt
+    # re-read the jr targets off the narrowed states
+    targets, why, sites = None, None, {}
+    for b in blocks:
+        if entry.get(b) is None:
+            continue
+        regs, facts, branch, w = run_block(words, base, blocks[b], entry[b], ro)
+        if w and why is None:
+            why = w
+        if branch and branch[0] == "jr":
+            jr_pc = b
+            for pc in blocks[b]:
+                m2, _o, _t = disasm(words[(pc - base) // 4], pc)
+                if m2 == "jr":
+                    jr_pc = pc
+                    break
+            t = regs[branch[1][0]]
+            sites[jr_pc] = t if jr_pc not in sites else si_join(sites[jr_pc], t)
+            targets = t if targets is None else si_join(targets, t)
+    return entry, targets, n, why, sites
 
 
 # --- programs -----------------------------------------------------------------
@@ -366,6 +482,40 @@ COUNTER_LOOP = [
     bne("t1", "zero", -3),
     nop(),
     jr("t0"),
+]
+
+
+#      addiu $t0, $zero, 4
+#      slt   $t1, $a0, $t0
+#      beq   $t1, $zero, +5      if NOT less, branch to the DEFAULT at 0x20
+#      nop
+#      sll   $t1, $a0, 4
+#      addiu $t2, $zero, 0x20
+#      addu  $t3, $t2, $t1
+#      jr    $t3                 <- the table dispatch
+# 0x20 addiu $t3, $zero, 0x99    <- the default handler
+#      jr    $t3
+#
+# This is `absint.GUARDED` with the bug taken out. In that version the branch
+# offset is 4, which lands on 0x1c — **the `jr` itself**. The comment says
+# "branch away to a default" and there is no default: the guard-failed path
+# falls onto the dispatch with `$t3` never assigned. absint's straight-line walk
+# never follows a branch, so it reported that program as resolving *exactly* to
+# four handlers, and I published that as the headline result on 2026-09-24.
+# The CFG analyser found it on first contact, because modelling both edges makes
+# the unassigned register arrive at the join. Kept both programs: the broken one
+# is now a regression test that a mis-aimed guard is not a guard.
+GUARDED_DEFAULT = [
+    addiu("t0", "zero", 4),
+    slt("t1", "a0", "t0"),
+    beq("t1", "zero", 5),
+    nop(),
+    sll("t1", "a0", 4),
+    addiu("t2", "zero", 0x20),
+    addu("t3", "t2", "t1"),
+    jr("t3"),
+    addiu("t3", "zero", 0x99),
+    jr("t3"),
 ]
 
 
@@ -426,6 +576,58 @@ def selftest():
     check("the branch block has two successors", len(succ[0x8]) == 2)
     check("a back edge exists", any(t <= 0x8 for t, _ in succ[0x8]))
 
+    print("\nnarrowing")
+    w = analyse_cfg(COUNTER_LOOP, 0, narrow=False)
+    n = analyse_cfg(COUNTER_LOOP, 0, narrow=True)
+    wv = w["targets"].values() or []
+    nv = n["targets"].values() or []
+    check("widening alone leaves an extra value", wv == [40, 44], f"{wv}")
+    check("narrowing recovers the exact answer", nv == [40], f"{nv}")
+    check("it terminates in a few rounds", 0 < n["narrow_rounds"] <= 8,
+          f"{n['narrow_rounds']} rounds")
+    # SOUNDNESS: the narrowed answer must still contain the true value...
+    check("SOUND: the real exit value survives narrowing", 40 in nv, f"{nv}")
+    # ...and must be CONTAINED in the widened answer, never larger anywhere.
+    def contains(big, small):
+        if big is None or small is None: return True
+        if big.top: return True
+        if small.top: return False
+        bs, ss = big.values(1 << 20), small.values(1 << 20)
+        return bs is not None and ss is not None and set(ss) <= set(bs)
+    grew = [r for r in range(32)
+            if not contains(w["entry"][0x8][r], n["entry"][0x8][r])]
+    check("MONOTONE: no register grew during the descent", not grew, f"grew: {grew}")
+    check("the loop-body entry is what tightened",
+          n["entry"][0x8][8].hi == 36 and w["entry"][0x8][8].hi == 40,
+          f"{w['entry'][0x8][8].hi} -> {n['entry'][0x8][8].hi}")
+
+    print("\nper-site jr targets, and a fixture bug they exposed")
+    from absint import GUARDED as MISAIMED, RO as RO_
+    mis = analyse_cfg(MISAIMED, 0, ro=RO_)
+    check("a guard that branches onto its own dispatch yields TOP",
+          len(mis["sites"]) == 1 and list(mis["sites"].values())[0].top,
+          f"{ {hex(k): str(v) for k,v in mis['sites'].items()} }")
+    good = analyse_cfg(GUARDED_DEFAULT, 0, ro=RO_)
+    sv = {hex(k): (v.values() or []) for k, v in good["sites"].items()}
+    check("with a real default, two dispatch sites are found", len(good["sites"]) == 2, f"{sv}")
+    check("the table site resolves exactly", sv.get("0x1c") == [32, 48, 64, 80], f"{sv}")
+    check("the default site resolves exactly", sv.get("0x24") == [153], f"{sv}")
+    # and the two analysers must AGREE on the site they can both see
+    from absint import analyse as straight
+    st, _f, _w = straight(GUARDED_DEFAULT, 0, ro=RO_)
+    check("straight-line and CFG agree on the shared site",
+          (st.values() or []) == sv.get("0x1c"), f"{st.values()} vs {sv.get('0x1c')}")
+
+    print("\nRED: narrowing must not touch a straight-line answer")
+    # absint's guarded dispatch has no back edge, so there is nothing to reclaim;
+    # if narrowing "improves" it, narrowing is unsound rather than clever.
+    from absint import GUARDED, RO
+    gw = analyse_cfg(GUARDED, 0, ro=RO, narrow=False)
+    gn = analyse_cfg(GUARDED, 0, ro=RO, narrow=True)
+    check("no-loop program is unchanged by narrowing",
+          str(gw["targets"]) == str(gn["targets"]),
+          f"{gw['targets']} vs {gn['targets']}")
+
     print("\nfixpoint on a counter loop")
     r = analyse_cfg(COUNTER_LOOP, 0)
     t = r["targets"]
@@ -435,11 +637,17 @@ def selftest():
         check("the stride survived the whole loop", t.stride == 4, f"stride {t.stride}")
         vals = t.values() or []
         # The true answer is exactly {40}: i steps 0,4,..,40 and exits when
-        # 40 < 40 fails. The analysis says {40,44} — SOUND, and one value loose.
+        # 40 < 40 fails.
+        #
+        # ⚠️ These assertions used to read `vals == [40, 44]` and `len(vals) == 2`,
+        # written deliberately on 2026-09-29 so the suite stated the imprecision
+        # rather than hiding it. Good instinct, wrong mechanism: an equality
+        # assertion about a loose answer is a **ratchet against improvement**, and
+        # it failed the moment narrowing made the answer exact. A test that
+        # asserts "wrong in exactly this way" breaks when you stop being wrong.
+        # Bounds, not equality: soundness must hold, looseness may shrink.
         check("SOUND: the real exit value is included", 40 in vals, f"{vals}")
-        check("and it is an over-approximation, stated not hidden",
-              vals == [40, 44], f"{vals}")
-        check("two values instead of four billion", len(vals) == 2, f"{len(vals)}")
+        check("looseness is bounded, and may improve", len(vals) <= 2, f"{vals}")
 
     print("\n" + ("  all cases pass." if ok else "  FAILURES ABOVE."))
     return 0 if ok else 1
