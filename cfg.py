@@ -311,6 +311,7 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400,
     rounds = 0
     targets, why_all = None, None
     per_site = {}
+    escapes = set()
 
     while work and rounds < max_rounds:
         rounds += 1
@@ -339,6 +340,14 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400,
             continue
         for tgt, kind in succ.get(b, []):
             if tgt not in blocks:
+                # Control LEAVES the analysed region here. Silently dropping this
+                # edge is what absint does by accident and what I was doing on
+                # purpose, and it is the same blindness: absint.LOADED's guard
+                # branches to 0x2c on a program that ends at 0x24, so the
+                # guard-failed path was being discarded without a word. Record it
+                # — anything can happen out there, and a caller deserves to know
+                # the answer is conditional on never taking that edge.
+                escapes.add((b, tgt, kind))
                 continue
             nxt = refine_for_edge(regs, facts, branch, kind)
             if nxt is None:
@@ -377,7 +386,7 @@ def analyse_cfg(words, base=0, ro=None, delay=2, trace=False, max_rounds=400,
 
     return dict(entry=entry, blocks=blocks, succ=succ, targets=targets,
                 wide_targets=wide_targets, narrow_rounds=narrow_rounds,
-                sites=per_site,
+                sites=per_site, escapes=sorted(escapes),
                 rounds=rounds, converged=converged, why=why_all)
 
 
@@ -617,6 +626,19 @@ def selftest():
     st, _f, _w = straight(GUARDED_DEFAULT, 0, ro=RO_)
     check("straight-line and CFG agree on the shared site",
           (st.values() or []) == sv.get("0x1c"), f"{st.values()} vs {sv.get('0x1c')}")
+
+    print("\nescaping edges are recorded, not dropped")
+    from absint import LOADED as LOADED_
+    ld = analyse_cfg(LOADED_, 0, ro=RO_)
+    check("a branch off the end of the program is recorded",
+          ld["escapes"] == [(0, 0x2c, "taken")], f"{ld['escapes']}")
+    check("...and the in-range answer still resolves",
+          (list(ld["sites"].values())[0].values() or []) ==
+          [0x400120, 0x400188, 0x4001a8, 0x400214],
+          f"{ {hex(k): v.values() for k,v in ld['sites'].items()} }")
+    check("a program whose branches all land in range records none",
+          analyse_cfg(GUARDED_DEFAULT, 0, ro=RO_)["escapes"] == [],
+          f"{analyse_cfg(GUARDED_DEFAULT, 0, ro=RO_)['escapes']}")
 
     print("\nRED: narrowing must not touch a straight-line answer")
     # absint's guarded dispatch has no back edge, so there is nothing to reclaim;
