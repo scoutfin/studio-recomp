@@ -53,6 +53,9 @@ def addu(rd, rs, rt):   return R(rs, rt, rd, 0x21)
 def subu(rd, rs, rt):   return R(rs, rt, rd, 0x23)
 def lw(rt, off, rs):    return I(0x23, rs, rt, off)
 def sw(rt, off, rs):    return I(0x2B, rs, rt, off)
+def lb(rt, off, rs):    return I(0x20, rs, rt, off)
+def lbu(rt, off, rs):   return I(0x24, rs, rt, off)
+def sb(rt, off, rs):    return I(0x28, rs, rt, off)
 def sll(rd, rt, sh):    return R("zero", rt, rd, 0x00, sh)
 def srl(rd, rt, sh):    return R("zero", rt, rd, 0x02, sh)
 def slt(rd, rs, rt):    return R(rs, rt, rd, 0x2A)
@@ -98,6 +101,15 @@ def disasm(w, pc=0):
     # loud because I stared at it twice.
     if op == 0x23: return ("lw", (rt, simm, rs), None)
     if op == 0x2B: return ("sw", (rt, simm, rs), None)
+    # Byte loads/stores, added 2026-10-30. These are what make endianness
+    # OBSERVABLE: a word load/store moves all four bytes together and a
+    # word-addressed memory model can fake it, but `sw` a word then `lb` one of
+    # its bytes and the answer depends on byte order. MIPS I is big-endian:
+    # the byte at the lowest address is the most significant one. lb
+    # sign-extends, lbu zero-extends.
+    if op == 0x20: return ("lb", (rt, simm, rs), None)
+    if op == 0x24: return ("lbu", (rt, simm, rs), None)
+    if op == 0x28: return ("sb", (rt, simm, rs), None)
     raise ValueError(f"unknown opcode 0x{op:02x} in 0x{w:08x}")
 
 
@@ -113,4 +125,7 @@ def pretty(w, pc=0):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, {ops[2]}"
     if m in ("addiu", "andi", "ori"):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, {ops[2]}"
+    if m in ("lw", "sw", "lb", "lbu", "sb"):
+        # I-type (rt, offset, rs), printed in load/store syntax off($base).
+        return f"{m} ${RNAME[ops[0]]}, {ops[1]}(${RNAME[ops[2]]})"
     return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, ${RNAME[ops[2]]}"

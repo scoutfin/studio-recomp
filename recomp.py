@@ -32,8 +32,8 @@ a long way.
 import subprocess
 import sys
 
-from mips import (RNAME, addiu, addu, andi, beq, bne, disasm, jr, nop, pretty,
-                  r, slt, sll, srl, subu)
+from mips import (RNAME, addiu, addu, andi, beq, bne, disasm, jr, lb, lbu, lw,
+                  nop, pretty, r, sb, slt, sll, srl, subu, sw)
 
 
 def targets(words, base=0):
@@ -59,6 +59,16 @@ def stmt(w, pc):
     if m == "addiu": return f"W({o[0]}, r[{o[1]}] + {o[2]});"
     if m == "andi":  return f"W({o[0]}, r[{o[1]}] & 0x{o[2]:x}u);"
     if m == "ori":   return f"W({o[0]}, r[{o[1]}] | 0x{o[2]:x}u);"
+    # Memory, added 2026-10-30. disasm gives loads/stores as (rt, offset, rs);
+    # the effective address is r[rs] + offset. Stores write memory, not a
+    # register, so they do not use the W() zero-guard. The endianness lives
+    # entirely in the LW/SW/LB macros in the prelude, in one place, so the
+    # recompiler emits the same byte order the interpreter reads.
+    if m == "lw":    return f"W({o[0]}, LW(r[{o[2]}] + {o[1]}));"
+    if m == "sw":    return f"SW(r[{o[2]}] + {o[1]}, r[{o[0]}]);"
+    if m == "lb":    return f"W({o[0]}, LB(r[{o[2]}] + {o[1]}));"
+    if m == "lbu":   return f"W({o[0]}, LBU(r[{o[2]}] + {o[1]}));"
+    if m == "sb":    return f"SB(r[{o[2]}] + {o[1]}, r[{o[0]}]);"
     raise ValueError(f"no statement form for {m}")
 
 
@@ -113,15 +123,49 @@ PRELUDE = """#include <stdint.h>
 #include <stdio.h>
 /* $zero is hardwired to 0: writes to it are discarded, not stored. */
 #define W(d, v) do { uint32_t _v = (uint32_t)(v); if ((d) != 0) r[(d)] = _v; } while (0)
+
+/* Memory is a flat byte array. MIPS I is BIG-ENDIAN: the byte at the lowest
+ * address is the most significant. Every load and store names the byte order
+ * explicitly here, so it does NOT depend on the host's endianness. That is the
+ * whole point: this file is compiled and run on a little-endian x86 host, and
+ * the emitted program must still behave like a big-endian machine. */
+#define MEMSZ 65536
+static uint8_t mem[MEMSZ];
+#define LW(a)   ((uint32_t)mem[(a)]<<24 | (uint32_t)mem[(a)+1]<<16 \\
+                 | (uint32_t)mem[(a)+2]<<8 | (uint32_t)mem[(a)+3])
+#define SW(a,v) do { uint32_t _a=(a), _v=(uint32_t)(v); \\
+    mem[_a]=_v>>24; mem[_a+1]=_v>>16; mem[_a+2]=_v>>8; mem[_a+3]=_v; } while (0)
+#define LB(a)   ((uint32_t)(int32_t)(int8_t)mem[(a)])   /* sign-extend */
+#define LBU(a)  ((uint32_t)mem[(a)])                    /* zero-extend */
+#define SB(a,v) (mem[(a)] = (uint8_t)(v))
 """
 
 
-def interp(words, a0, base=0, delay_slots=True):
+MEMSZ = 65536
+
+
+def _be_lw(mem, a):
+    return (mem[a] << 24) | (mem[a + 1] << 16) | (mem[a + 2] << 8) | mem[a + 3]
+
+
+def _be_sw(mem, a, v):
+    v &= 0xFFFFFFFF
+    mem[a] = (v >> 24) & 0xFF
+    mem[a + 1] = (v >> 16) & 0xFF
+    mem[a + 2] = (v >> 8) & 0xFF
+    mem[a + 3] = v & 0xFF
+
+
+def interp(words, a0, base=0, delay_slots=True, mem=None):
     """Reference interpreter — the independent second record. Deliberately
     written as a fetch/decode/dispatch loop, i.e. the thing recompilation
-    replaces."""
+    replaces. Memory is a big-endian byte array, matching the prelude macros;
+    it is the SECOND independent record of the byte order, which is the only
+    kind of check that works here."""
     reg = [0] * 32
     reg[4] = a0
+    if mem is None:
+        mem = bytearray(MEMSZ)
     pc, steps = base, 0
     while steps < 100000:
         steps += 1
@@ -141,7 +185,7 @@ def interp(words, a0, base=0, delay_slots=True):
             # with the broken recompiler and I nearly read that as confirmation.
             # Two records that share a defect are one record.
             if delay_slots:
-                run_one(words, reg, base, pc + 4)
+                run_one(words, reg, mem, base, pc + 4)
             if o[0] == 31:
                 return reg[2]
             pc = reg[o[0]]
@@ -149,16 +193,16 @@ def interp(words, a0, base=0, delay_slots=True):
         if m in ("beq", "bne"):
             take = (reg[o[0]] == reg[o[1]]) if m == "beq" else (reg[o[0]] != reg[o[1]])
             if delay_slots:
-                run_one(words, reg, base, pc + 4)
+                run_one(words, reg, mem, base, pc + 4)
                 nxt = pc + 8
             pc = tgt if take else nxt
             continue
-        run_one(words, reg, base, pc)
+        run_one(words, reg, mem, base, pc)
         pc = nxt
     raise RuntimeError("interpreter did not halt")
 
 
-def run_one(words, reg, base, pc):
+def run_one(words, reg, mem, base, pc):
     w = words[(pc - base) // 4]
     m, o, _ = disasm(w, pc)
 
@@ -175,4 +219,13 @@ def run_one(words, reg, base, pc):
     elif m == "addiu": wr(o[0], reg[o[1]] + o[2])
     elif m == "andi":  wr(o[0], reg[o[1]] & o[2])
     elif m == "ori":   wr(o[0], reg[o[1]] | o[2])
+    # Memory: effective address is reg[rs] + offset, with rs = o[2], off = o[1].
+    # Big-endian, matching the prelude macros byte for byte.
+    elif m == "lw":    wr(o[0], _be_lw(mem, reg[o[2]] + o[1]))
+    elif m == "sw":    _be_sw(mem, reg[o[2]] + o[1], reg[o[0]])
+    elif m == "lb":
+        b = mem[reg[o[2]] + o[1]]
+        wr(o[0], b | 0xFFFFFF00 if b & 0x80 else b)   # sign-extend
+    elif m == "lbu":   wr(o[0], mem[reg[o[2]] + o[1]])
+    elif m == "sb":    mem[reg[o[2]] + o[1]] = reg[o[0]] & 0xFF
     else: raise ValueError(f"run_one cannot execute {m}")
