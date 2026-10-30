@@ -3,3 +3,8 @@ collatz
 probe_ok
 probe_naive
 *.c
+mem0
+mem1
+mem2
+mem3
+memword
