@@ -48,6 +48,11 @@ def I(op, rs, rt, imm):
     return (op << 26) | (r(rs) << 21) | (r(rt) << 16) | (imm & 0xFFFF)
 
 
+def J(op, addr):
+    # J-type: the 26-bit field is a WORD index, so a byte address is stored >>2.
+    return (op << 26) | ((addr >> 2) & 0x3FFFFFF)
+
+
 # The subset this project needs. Each returns a 32-bit word.
 def addu(rd, rs, rt):   return R(rs, rt, rd, 0x21)
 def subu(rd, rs, rt):   return R(rs, rt, rd, 0x23)
@@ -60,6 +65,7 @@ def sll(rd, rt, sh):    return R("zero", rt, rd, 0x00, sh)
 def srl(rd, rt, sh):    return R("zero", rt, rd, 0x02, sh)
 def slt(rd, rs, rt):    return R(rs, rt, rd, 0x2A)
 def jr(rs):             return R(rs, "zero", "zero", 0x08)
+def jal(addr):          return J(0x03, addr)
 def addiu(rt, rs, imm): return I(0x09, rs, rt, imm)
 def andi(rt, rs, imm):  return I(0x0C, rs, rt, imm)
 def ori(rt, rs, imm):   return I(0x0D, rs, rt, imm)
@@ -107,6 +113,13 @@ def disasm(w, pc=0):
     # its bytes and the answer depends on byte order. MIPS I is big-endian:
     # the byte at the lowest address is the most significant one. lb
     # sign-extends, lbu zero-extends.
+    # jal, added 2026-11-02. The 26-bit field is a word index; the target byte
+    # address is (pc & 0xF0000000) | (field << 2). My programs sit at low
+    # addresses so the top nibble is 0. jal saves the return address (PC+8, past
+    # the delay slot) into $ra and jumps — the moment "one blob" becomes functions.
+    if op == 0x03:
+        tgt = (pc & 0xF0000000) | ((w & 0x3FFFFFF) << 2)
+        return ("jal", (tgt,), tgt)
     if op == 0x20: return ("lb", (rt, simm, rs), None)
     if op == 0x24: return ("lbu", (rt, simm, rs), None)
     if op == 0x28: return ("sb", (rt, simm, rs), None)
@@ -121,6 +134,8 @@ def pretty(w, pc=0):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, 0x{tgt:04x}"
     if m == "jr":
         return f"jr ${RNAME[ops[0]]}"
+    if m == "jal":
+        return f"jal 0x{ops[0]:04x}"
     if m in ("sll", "srl"):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, {ops[2]}"
     if m in ("addiu", "andi", "ori"):
