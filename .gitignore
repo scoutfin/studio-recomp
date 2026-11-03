@@ -8,3 +8,5 @@ mem1
 mem2
 mem3
 memword
+fib_ok
+fib_naive
