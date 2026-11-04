@@ -10,3 +10,6 @@ mem3
 memword
 fib_ok
 fib_naive
+cg_*
+!cg_*.py
+*.s
