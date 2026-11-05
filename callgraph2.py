@@ -282,7 +282,7 @@ def build_run(words, entries, name, ns, opt="-O2", fallthrough=False):
     return [int(x) for x in r.stdout.split()], (r.stderr.strip() or f"exit {r.returncode}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and __import__("sys").argv[1:] != ["--table"]:
     ns = list(range(0, 21))
     # 1. shared epilogue
     words, L = assemble(SHARED)
@@ -340,3 +340,26 @@ if __name__ == "__main__":
         out, msg = build_run(w2, e2, "cg2_all", ns, fallthrough=True)
         print(f"   crude scan + fallthrough on {name}:", "matches" if out == [want(n) for n in ns] else f"WRONG {out} {msg}")
 
+
+
+def table(ns=range(21)):
+    """Every cell of the table in the 2026-11-05 studio log, actually run."""
+    ns = list(ns)
+    progs = {"fnptr": (FNPTR, lambda n: 2 * n + 1), "fnptr via memory": (FNPTR_MEM, lambda n: 2 * n + 1),
+             "coincidence": (COINCIDENCE, lambda n: n + 8)}
+    rules = [("jal targets only", jal_entries, False),
+             ("+ constant propagation", lambda w: jal_entries(w) | pointer_entries(w), False),
+             ("+ crude scan", lambda w: jal_entries(w) | address_constants(w), False),
+             ("+ crude scan + fallthrough merge", lambda w: jal_entries(w) | address_constants(w), True)]
+    print(" " * 34 + "".join(f"{p:18}" for p in progs))
+    for name, rule, ft in rules:
+        cells = []
+        for p, want in progs.values():
+            w, _ = assemble(p)
+            out, msg = build_run(w, rule(w), "cg2_tab", ns, fallthrough=ft)
+            cells.append("ok" if out == [want(n) for n in ns] else ("ABORT" if "not a known function" in msg else "WRONG"))
+        print(f"{name:34}" + "".join(f"{c:18}" for c in cells))
+
+
+if __name__ == "__main__" and __import__("sys").argv[1:] == ["--table"]:
+    table()
