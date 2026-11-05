@@ -13,3 +13,5 @@ fib_naive
 cg_*
 !cg_*.py
 *.s
+cg2_*
+!cg2_*.py

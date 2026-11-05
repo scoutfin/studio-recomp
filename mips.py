@@ -65,6 +65,7 @@ def sll(rd, rt, sh):    return R("zero", rt, rd, 0x00, sh)
 def srl(rd, rt, sh):    return R("zero", rt, rd, 0x02, sh)
 def slt(rd, rs, rt):    return R(rs, rt, rd, 0x2A)
 def jr(rs):             return R(rs, "zero", "zero", 0x08)
+def jalr(rs, rd="ra"):  return R(rs, "zero", rd, 0x09)   # call through a register
 def jal(addr):          return J(0x03, addr)
 def addiu(rt, rs, imm): return I(0x09, rs, rt, imm)
 def andi(rt, rs, imm):  return I(0x0C, rs, rt, imm)
@@ -90,6 +91,9 @@ def disasm(w, pc=0):
         if fn == 0x02: return ("srl", (rd, rt, sh), None)
         if fn == 0x2A: return ("slt", (rd, rs, rt), None)
         if fn == 0x08: return ("jr", (rs,), None)
+        # jalr, added 2026-11-04: a call whose target is a REGISTER, i.e. a function
+        # pointer. No target is known at decode time, so the third field is None.
+        if fn == 0x09: return ("jalr", (rd, rs), None)
         raise ValueError(f"unknown R funct 0x{fn:02x} in 0x{w:08x}")
     # Branch targets are PC-relative in INSTRUCTIONS, measured from the
     # instruction AFTER the branch — because the delay slot has already been
@@ -132,6 +136,8 @@ def pretty(w, pc=0):
         return "nop"
     if m in ("beq", "bne"):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, 0x{tgt:04x}"
+    if m == "jalr":
+        return f"jalr ${RNAME[ops[0]]}, ${RNAME[ops[1]]}"
     if m == "jr":
         return f"jr ${RNAME[ops[0]]}"
     if m == "jal":
