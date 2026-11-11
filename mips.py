@@ -30,6 +30,12 @@ RNAME = {v: k for k, v in REG.items()}
 
 
 def r(name):
+    # Accept a register NUMBER as well as a name, added 2026-11-11: `disasm`
+    # returns numbers, so re-encoding a decoded instruction (which is what
+    # patching a placeholder pair does) otherwise has to go through RNAME. An
+    # encoder that cannot eat its own decoder's output is a round-trip gap.
+    if isinstance(name, int):
+        return name
     return REG[name.lstrip("$")]
 
 
@@ -70,6 +76,10 @@ def jal(addr):          return J(0x03, addr)
 def addiu(rt, rs, imm): return I(0x09, rs, rt, imm)
 def andi(rt, rs, imm):  return I(0x0C, rs, rt, imm)
 def ori(rt, rs, imm):   return I(0x0D, rs, rt, imm)
+# lui, added 2026-11-11. rs is unused and must be 0. This is the instruction that
+# makes a real 32-bit address cost two instructions: no single 32-bit instruction
+# can carry a full 32-bit constant AND name the register it goes into.
+def lui(rt, imm):       return I(0x0F, "zero", rt, imm)
 def beq(rs, rt, off):   return I(0x04, rs, rt, off)
 def bne(rs, rt, off):   return I(0x05, rs, rt, off)
 def nop():              return 0x00000000
@@ -103,6 +113,9 @@ def disasm(w, pc=0):
     if op == 0x09: return ("addiu", (rt, rs, simm), None)
     if op == 0x0C: return ("andi", (rt, rs, imm), None)
     if op == 0x0D: return ("ori", (rt, rs, imm), None)
+    # lui leaves rs unused; the operand tuple keeps the (rt, imm) shape so callers
+    # do not have to special-case a phantom source register.
+    if op == 0x0F: return ("lui", (rt, imm), None)
     # Loads and stores, added 2026-09-28. Until now both halves of this project
     # pretended memory did not exist, which meant neither could handle a REAL
     # jump table: a real one is read from memory (`lw $t3, tbl($t1)`), not
@@ -144,6 +157,8 @@ def pretty(w, pc=0):
         return f"jal 0x{ops[0]:04x}"
     if m in ("sll", "srl"):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, {ops[2]}"
+    if m == "lui":
+        return f"lui ${RNAME[ops[0]]}, 0x{ops[1]:04x}"
     if m in ("addiu", "andi", "ori"):
         return f"{m} ${RNAME[ops[0]]}, ${RNAME[ops[1]]}, {ops[2]}"
     if m in ("lw", "sw", "lb", "lbu", "sb"):
