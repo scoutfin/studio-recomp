@@ -17,3 +17,6 @@ cg2_*
 !cg2_*.py
 ap_*
 !ap_*.py
+gt/*.o
+gt/*.elf
+gt/*.so
